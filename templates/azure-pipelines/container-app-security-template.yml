@@ -1,0 +1,136 @@
+# Template for building and deploying a containerized application with pre-configured security stages
+
+parameters:
+  - name: serviceConnection
+    type: string
+    displayName: Azure Service Connection
+  - name: vmImage
+    type: string
+    default: 'ubuntu-latest'
+    displayName: Agent VM Image
+  - name: dockerRegistryServiceConnection
+    type: string
+    displayName: Docker Registry Service Connection
+  - name: imageName
+    type: string
+    displayName: Container Image Name
+  - name: containerScanTool
+    type: string
+    default: 'ACR' # Options: ACR, Aqua, Twistlock, None
+    displayName: Container Security Scan Tool
+  - name: aquaServiceConnection
+    type: string
+    default: ''
+    displayName: Aqua Security Service Connection (if applicable)
+  - name: twistlockServiceConnection
+    type: string
+    default: ''
+    displayName: Twistlock Service Connection (if applicable)
+  - name: deploymentEnvironment
+    type: string
+    displayName: Deployment Environment Name
+  - name: kubernetesServiceConnection
+    type: string
+    displayName: Kubernetes Service Connection (if deploying to AKS)
+
+stages:
+- stage: Build
+  displayName: 'Build and Push Container Image'
+  jobs:
+  - job: BuildAndPushJob
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - task: Docker@2
+      displayName: 'Build and Push Image to ACR'
+      inputs:
+        containerRegistry: ${{ parameters.dockerRegistryServiceConnection }}
+        repository: ${{ parameters.imageName }}
+        command: 'buildAndPush'
+        Dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)'
+        tags: '$(Build.BuildId)'
+
+- stage: SecurityScan
+  displayName: 'Container Security Scanning'
+  dependsOn: Build
+  jobs:
+  - job: ContainerScanJob
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - checkout: self
+
+    - ${{ if eq(parameters.containerScanTool, 'ACR') }}:
+      - task: AzureCLI@2
+        displayName: 'Scan Image with Azure Container Registry'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            REGISTRY_NAME=$(az container registry show --name $(echo ${{ parameters.dockerRegistryServiceConnection }} | cut -d':' -f1) --query loginServer -o tsv)
+            IMAGE_NAME="${REGISTRY_NAME}/${{ parameters.imageName }}:$(Build.BuildId)"
+            az acr task create \
+              --registry $(echo ${{ parameters.dockerRegistryServiceConnection }} | cut -d':' -f1) \
+              --name acrscan-$(Build.BuildId) \
+              --image "$IMAGE_NAME" \
+              --once
+          addSpnToEnvironment: true
+
+    - ${{ if eq(parameters.containerScanTool, 'Aqua') }}:
+      - task: CmdLine@2
+        displayName: 'Run Aqua Security Scan'
+        inputs:
+          script: |
+            # Assuming Aqua CLI is installed and configured
+            aqua scan --registry $(echo ${{ parameters.dockerRegistryServiceConnection }} | cut -d':' -f1) --image ${{ parameters.imageName }}:$(Build.BuildId) --fail-on high
+          # Consider adding secure environment variables for Aqua credentials
+
+    - ${{ if eq(parameters.containerScanTool, 'Twistlock') }}:
+      - task: CmdLine@2
+        displayName: 'Run Twistlock Scan'
+        inputs:
+          script: |
+            # Assuming Twistcli is installed and configured
+            ./twistcli scan --address <your_console_address> --token <your_api_token> --details --fail_on_severity high --image $(echo ${{ parameters.dockerRegistryServiceConnection }} | cut -d':' -f1)/${{ parameters.imageName }}:$(Build.BuildId)
+          # Consider adding secure environment variables for Twistlock credentials
+
+    - ${{ if ne(parameters.containerScanTool, 'None') }}:
+      - script: echo "Container scanning with ${{ parameters.containerScanTool }} completed."
+        displayName: 'Container Scan Summary'
+    - ${{ if eq(parameters.containerScanTool, 'None') }}:
+      - script: echo "Container scanning is skipped as per configuration."
+        displayName: 'Container Scan Skipped'
+
+- stage: Deploy
+  displayName: 'Deploy to ${{ parameters.deploymentEnvironment }}'
+  dependsOn: SecurityScan
+  jobs:
+  - deployment: DeployJob
+    environment: ${{ parameters.deploymentEnvironment }}
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    strategy:
+      runOnce:
+        preDeploy:
+          steps:
+          # Add pre-deployment security gates here
+          - script: echo "Running pre-deployment security checks..."
+            displayName: 'Pre-deployment Security Checks'
+            # Example: Check Kubernetes RBAC policies
+            # - task: Kubernetes@1
+            #   inputs:
+            #     connectionType: 'Kubernetes Service Connection'
+            #     kubernetesServiceEndpoint: ${{ parameters.kubernetesServiceConnection }}
+            #     command: 'get'
+            #     arguments: 'rolebindings -n your-namespace'
+        deploy:
+          steps:
+          - task: KubernetesManifest@0
+            displayName: 'Deploy to Kubernetes'
+            inputs:
+              action: 'deploy'
+              kubernetesServiceConnection: ${{ parameters.kubernetesServiceConnection }}
+              manifests: '$(Build.SourcesDirectory)/kubernetes/deployment.yaml' # Adjust path
+              containers: '${{ parameters.imageName }}:$(Build.BuildId)'
