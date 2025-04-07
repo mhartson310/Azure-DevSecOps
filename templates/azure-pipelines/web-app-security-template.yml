@@ -1,0 +1,176 @@
+#Template for building and deploying a web application with pre-configured security stages
+
+parameters:
+  - name: serviceConnection
+    type: string
+    displayName: Azure Service Connection
+  - name: vmImage
+    type: string
+    default: 'ubuntu-latest'
+    displayName: Agent VM Image
+  - name: buildConfiguration
+    type: string
+    default: 'Release'
+    displayName: Build Configuration
+  - name: pathToSolution
+    type: string
+    displayName: Path to Solution File
+  - name: pathToWebAppProject
+    type: string
+    displayName: Path to Web App Project
+  - name: sa تحليلTool
+    type: string
+    default: 'SonarQube' # Options: SonarQube, Checkmarx, Veracode, None
+    displayName: Static Analysis Security Testing (SAST) Tool
+  - name: sonarqubeServiceConnection
+    type: string
+    default: ''
+    displayName: SonarQube Service Connection (if applicable)
+  - name: sonarqubeProjectKey
+    type: string
+    default: ''
+    displayName: SonarQube Project Key (if applicable)
+  - name: checkmarxServiceConnection
+    type: string
+    default: ''
+    displayName: Checkmarx Service Connection (if applicable)
+  - name: veracodeServiceConnection
+    type: string
+    default: ''
+    displayName: Veracode Service Connection (if applicable)
+  - name: deploymentEnvironment
+    type: string
+    displayName: Deployment Environment Name
+
+stages:
+- stage: Build
+  displayName: 'Build and Unit Tests'
+  jobs:
+  - job: BuildAndTestJob
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - task: UseDotNet@2
+      displayName: 'Use .NET SDK'
+      inputs:
+        packageType: sdk
+        version: '8.x' # Adjust as needed
+
+    - task: NuGetToolInstaller@1
+      displayName: 'Use NuGet Tool Installer'
+
+    - task: NuGetCommand@2
+      displayName: 'Restore NuGet Packages'
+      inputs:
+        restoreSolution: '${{ parameters.pathToSolution }}'
+
+    - task: MSBuild@1
+      displayName: 'Build Solution'
+      inputs:
+        solution: '${{ parameters.pathToSolution }}'
+        configuration: '${{ parameters.buildConfiguration }}'
+
+    - task: VSTest@2
+      displayName: 'Run Unit Tests'
+      inputs:
+        testAssemblyVer2: |
+          **/*[Tt]ests/*.dll
+          **/*[Tt]ests/*.pdb
+        searchFolder: '$(Build.SourcesDirectory)'
+
+    # Add other build-related tasks here
+
+- stage: SecurityScan
+  displayName: 'Security Scanning'
+  dependsOn: Build
+  jobs:
+  - job: SASTJob
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    steps:
+    - checkout: self
+
+    - ${{ if eq(parameters.sa تحليلTool, 'SonarQube') }}:
+      - task: SonarQubePrepare@5
+        displayName: 'Prepare SonarQube Analysis'
+        inputs:
+          SonarQube: ${{ parameters.sonarqubeServiceConnection }}
+          scannerMode: 'MSBuild'
+          projectKey: ${{ parameters.sonarqubeProjectKey }}
+          projectName: '$(Build.DefinitionName)'
+
+      - task: MSBuild@1
+        displayName: 'Build Solution for SonarQube'
+        inputs:
+          solution: '${{ parameters.pathToSolution }}'
+          configuration: '${{ parameters.buildConfiguration }}'
+
+      - task: SonarQubeAnalyze@5
+        displayName: 'Run SonarQube Analysis'
+
+      - task: SonarQubePublish@5
+        displayName: 'Publish SonarQube Quality Gate Result'
+        inputs:
+          pollingTimeoutSec: '300'
+
+    - ${{ if eq(parameters.sa تحليلTool, 'Checkmarx') }}:
+      - task: CheckmarxSCA@2023
+        displayName: 'Run Checkmarx Scan'
+        inputs:
+          checkmarxConnection: ${{ parameters.checkmarxServiceConnection }}
+          project: '$(Build.DefinitionName)'
+          sourcePath: '$(Build.SourcesDirectory)'
+          # Add other Checkmarx specific configurations
+
+    - ${{ if eq(parameters.sa تحليلTool, 'Veracode') }}:
+      - task: VeracodePrepare@1
+        displayName: 'Prepare Veracode Analysis'
+        inputs:
+          veracodeApiId: '$(veracodeApiId)' # Consider using a secret variable
+          veracodeApiKey: '$(veracodeApiKey)' # Consider using a secret variable
+          applicationName: '$(Build.DefinitionName)'
+
+      - task: VeracodeStaticScan@1
+        displayName: 'Run Veracode Static Scan'
+        inputs:
+          # Add Veracode specific scan configurations
+
+    - ${{ if ne(parameters.sa تحليلTool, 'None') }}:
+      - script: echo "SAST scanning with ${{ parameters.sa تحليلTool }} completed."
+        displayName: 'SAST Scan Summary'
+    - ${{ if eq(parameters.sa تحليلTool, 'None') }}:
+      - script: echo "SAST scanning is skipped as per configuration."
+        displayName: 'SAST Skipped'
+
+    # Add other security scanning tasks here (e.g., SCA, IaC Scan if applicable)
+
+- stage: Deploy
+  displayName: 'Deploy to ${{ parameters.deploymentEnvironment }}'
+  dependsOn: SecurityScan
+  jobs:
+  - deployment: DeployJob
+    environment: ${{ parameters.deploymentEnvironment }}
+    pool:
+      vmImage: ${{ parameters.vmImage }}
+    strategy:
+      runOnce:
+        preDeploy:
+          steps:
+          # Add pre-deployment security gates here
+          - script: echo "Running pre-deployment security checks..."
+            displayName: 'Pre-deployment Security Checks'
+            # Example: Invoke Azure Function to check for compliance
+            # - task: AzureFunction@1
+            #   inputs:
+            #     functionAppName: 'your-function-app'
+            #     functionName: 'SecurityGateFunction'
+            #     # ... other inputs ...
+        deploy:
+          steps:
+          - task: AzureWebApp@1
+            displayName: 'Deploy Azure App Service'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              appType: 'webApp'
+              appName: '$(webAppName)' # Define this variable
+              package: '$(Build.ArtifactStagingDirectory)/**/*.zip' # Adjust as needed
