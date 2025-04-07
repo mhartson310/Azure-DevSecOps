@@ -1,0 +1,53 @@
+# azure-pipelines.yml
+# Main pipeline definition for the Azure-DevSecOps repository
+# This file demonstrates how to extend the web app and container app security templates.
+
+trigger:
+- main
+- develop
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  # General variables
+  azureSubscription: 'your-azure-service-connection' # Replace with your Azure service connection name
+  dockerRegistryServiceConnection: 'your-docker-registry-connection' # Replace with your Docker registry service connection name
+  kubernetesServiceConnection: 'your-aks-connection' # Replace with your AKS service connection name
+  resourceGroupName: 'your-resource-group' # Replace with your Azure Resource Group name
+
+  # Variables for Web App deployment
+  webAppName: 'your-web-app-name' # Replace with your actual web app name
+  webAppSolution: '**/*.sln'
+  webAppProject: 'YourWebApp/YourWebApp.csproj' # Adjust path to your web app project
+
+  # Variables for Container App deployment
+  imageRepository: 'yourregistry.azurecr.io/your-image-name' # Replace with your ACR details
+  containerAppName: 'your-container-app-name' # Replace with your container app name
+
+# --- Pipeline for building and deploying a Web Application with security ---
+- template: templates/azure-pipelines/web-app-security-template.yml
+  parameters:
+    serviceConnection: $(azureSubscription)
+    vmImage: 'windows-latest' # Example: Use Windows agent for .NET web apps
+    buildConfiguration: 'Release'
+    pathToSolution: $(webAppSolution)
+    pathToWebAppProject: $(webAppProject)
+    sa تحليلTool: 'SonarQube' # Choose your SAST tool: SonarQube, Checkmarx, Veracode, None
+    sonarqubeServiceConnection: 'your-sonarqube-connection' # Replace with your SonarQube service connection name
+    sonarqubeProjectKey: 'your-web-app-project-key' # Replace with your SonarQube project key
+    # checkmarxServiceConnection: 'your-checkmarx-connection' # Uncomment and configure if using Checkmarx
+    # veracodeServiceConnection: 'your-veracode-connection' # Uncomment and configure if using Veracode
+    deploymentEnvironment: 'Production' # Adjust as needed
+
+# --- Pipeline for building and deploying a Containerized Application with security ---
+- template: templates/azure-pipelines/container-app-security-template.yml
+  parameters:
+    serviceConnection: $(azureSubscription)
+    dockerRegistryServiceConnection: $(dockerRegistryServiceConnection)
+    imageName: '$(imageRepository)'
+    containerScanTool: 'ACR' # Choose your container scan tool: ACR, Aqua, Twistlock, None
+    # aquaServiceConnection: 'your-aqua-connection' # Uncomment and configure if using Aqua
+    # twistlockServiceConnection: 'your-twistlock-connection' # Uncomment and configure if using Twistlock
+    deploymentEnvironment: 'Production' # Adjust as needed
+    kubernetesServiceConnection: $(kubernetesServiceConnection)
